@@ -134,6 +134,29 @@ describe("createWorkflowService", () => {
 		});
 	});
 
+	it("allows agent-triggered selection only for manualOrAgent transitions", async () => {
+		const workflow = createWorkflow([
+			{ id: "approve", to: "test", trigger: "manual" },
+			{ id: "retry", to: "retry", trigger: "manualOrAgent" },
+		]);
+		const service = createWorkflowService({
+			store: createInMemoryWorkflowRunStore(),
+			executor: createFakeExecutor({ build: { kind: "command", exitCode: 0 } }),
+			presenter: createRecordingPresenter(),
+		});
+
+		service.register(workflow);
+		await service.start("wf", 10);
+		await service.runNext("wf", 20);
+
+		await expect(service.chooseAgent("wf", "approve", 30)).rejects.toThrow(
+			'Manual transition "approve" is not available in state "build"',
+		);
+
+		const after = await service.chooseAgent("wf", "retry", 30);
+		expect(after.currentStateId).toBe("retry");
+	});
+
 	it("clears presenter when workflow completes", async () => {
 		const workflow = createWorkflow([]);
 		const presenter = createRecordingPresenter();

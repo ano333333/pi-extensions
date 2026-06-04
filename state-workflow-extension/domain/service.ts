@@ -102,6 +102,24 @@ export const createWorkflowService = ({
 		await presenter.render(nextRun, workflow);
 		return nextRun;
 	};
+	const chooseAgent = async (
+		workflowId: WorkflowId,
+		transitionId: TransitionId,
+		now: number,
+	): Promise<WorkflowRunState> => {
+		const workflow = requireWorkflow(workflowId, registry.get(workflowId));
+		const run = requireRun(workflowId, await store.load(workflowId));
+		const nextRun = selectManualTransition({
+			definition: workflow,
+			run,
+			transitionId,
+			now,
+			allowedTriggers: ["manualOrAgent"],
+		});
+		await store.save(nextRun);
+		await presenter.render(nextRun, workflow);
+		return nextRun;
+	};
 
 	return {
 		register,
@@ -109,6 +127,7 @@ export const createWorkflowService = ({
 		start,
 		runNext,
 		chooseManual,
+		chooseAgent,
 		getRun,
 	};
 };

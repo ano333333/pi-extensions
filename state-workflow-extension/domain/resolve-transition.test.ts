@@ -70,7 +70,7 @@ describe("resolveTransition", () => {
 			action: { kind: "command", command: "build" },
 			transitions: [
 				{ id: "m1", to: "review", trigger: "manual" },
-				{ id: "m2", to: "abort", trigger: "manual" },
+				{ id: "m2", to: "abort", trigger: "manualOrAgent" },
 			],
 		};
 

@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 import {
 	createInMemoryWorkflowRunStore,
@@ -7,6 +8,7 @@ import {
 	createWorkflowService,
 	type ActionExecutionRequest,
 	type RawExecutionResult,
+	type WorkflowAdvanceResult,
 	type WorkflowDefinition,
 	type WorkflowRunSnapshot,
 	type WorkflowRunState,
@@ -14,6 +16,7 @@ import {
 export const REGISTER_WORKFLOW_EVENT = "state-workflow:register-workflow";
 export const REGISTER_FUNCTION_HANDLER_EVENT = "state-workflow:register-function-handler";
 export const START_WORKFLOW_EVENT = "state-workflow:start-workflow";
+export const WORKFLOW_NEXT_TOOL = "workflow_next";
 
 export type WorkflowSessionSnapshot = {
 	entries: unknown[];
@@ -79,6 +82,20 @@ type ActiveEntryData = {
 	workflowId: string | null;
 };
 
+type PendingToolTransition = {
+	toolCallId: string;
+	workflowId: string;
+	transitionId: string;
+};
+
+type WorkflowNextToolDetails = {
+	queued: boolean;
+	reason?: string;
+	pendingTransitionId?: string;
+	workflowId?: string;
+	transitionId?: string;
+};
+
 const parseWorkflowIdArg = (args: string): string | undefined => {
 	const workflowId = args.trim();
 	return workflowId || undefined;
@@ -125,6 +142,7 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 	const functionHandlers = new Map<string, WorkflowFunctionHandler>();
 	const snapshots = new Map<string, WorkflowRunSnapshot>();
 	let activeWorkflowId: string | null = null;
+	let pendingToolTransition: PendingToolTransition | null = null;
 	let latestSessionSnapshot: WorkflowSessionSnapshot = {
 		entries: [],
 		leafId: null,
@@ -271,24 +289,51 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 		return workflowId;
 	};
 
+	const runUntilPauseOrCompletion = async (
+		workflowId: string,
+		ctx: ExtensionContext,
+	): Promise<WorkflowAdvanceResult> => {
+		for (;;) {
+			captureSessionSnapshot(ctx);
+			const result = await service.runNext(workflowId, Date.now());
+			await refreshWidget(ctx);
+			if (result.kind !== "advanced") {
+				return result;
+			}
+		}
+	};
+
 	const chooseManualAndRunEnteredState = async (
 		workflowId: string,
 		transitionId: string,
-		ctx: ExtensionCommandContext,
+		ctx: ExtensionContext,
 	): Promise<void> => {
 		captureSessionSnapshot(ctx);
 		await service.chooseManual(workflowId, transitionId, Date.now());
 		await refreshWidget(ctx);
 		ctx.ui.notify(`Selected transition ${transitionId}`, "info");
 
-		captureSessionSnapshot(ctx);
-		const result = await service.runNext(workflowId, Date.now());
-		await refreshWidget(ctx);
+		const result = await runUntilPauseOrCompletion(workflowId, ctx);
 
-		if (result.kind === "advanced") {
-			ctx.ui.notify(`Advanced to ${result.nextStateId}`, "info");
+		if (result.kind === "waitingManual") {
+			ctx.ui.notify("Workflow is waiting for manual transition.", "info");
 			return;
 		}
+		ctx.ui.notify(`Workflow ${workflowId} completed.`, "info");
+	};
+
+	const chooseAgentAndRunEnteredState = async (
+		workflowId: string,
+		transitionId: string,
+		ctx: ExtensionContext,
+	): Promise<void> => {
+		captureSessionSnapshot(ctx);
+		await service.chooseAgent(workflowId, transitionId, Date.now());
+		await refreshWidget(ctx);
+		ctx.ui.notify(`Selected agent transition ${transitionId}`, "info");
+
+		const result = await runUntilPauseOrCompletion(workflowId, ctx);
+
 		if (result.kind === "waitingManual") {
 			ctx.ui.notify("Workflow is waiting for manual transition.", "info");
 			return;
@@ -316,13 +361,7 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		captureSessionSnapshot(ctx);
-		const result = await service.runNext(workflowId, Date.now());
-		await refreshWidget(ctx);
-		if (result.kind === "advanced") {
-			ctx.ui.notify(`Started and advanced to ${result.nextStateId}`, "info");
-			return;
-		}
+		const result = await runUntilPauseOrCompletion(workflowId, ctx);
 		if (result.kind === "waitingManual") {
 			ctx.ui.notify("Started workflow and entered manual transition wait state.", "info");
 			return;
@@ -341,10 +380,93 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 		})();
 	});
 
+	pi.registerTool({
+		name: WORKFLOW_NEXT_TOOL,
+		label: "Workflow Next",
+		description: "Queue a workflow manual transition for the active workflow.",
+		promptSnippet: "Use workflow_next to confirm a manual workflow transition by its transitionId.",
+		promptGuidelines: [
+			"Use workflow_next only when the session instructions explicitly tell you which workflow transitionId to select.",
+		],
+		parameters: Type.Object({
+			transitionId: Type.String({
+				description: "Manual workflow transition ID to select, for example retry-linter.",
+			}),
+		}),
+		async execute(toolCallId, params) {
+			const workflowId = activeWorkflowId;
+			const transitionId = params.transitionId.trim();
+			const details = (value: WorkflowNextToolDetails): WorkflowNextToolDetails => value;
+
+			if (!workflowId) {
+				return {
+					content: [{ type: "text", text: "No active workflow. workflow_next was ignored." }],
+					details: details({ queued: false, reason: "NO_ACTIVE_WORKFLOW" }),
+				};
+			}
+
+			if (!transitionId) {
+				return {
+					content: [{ type: "text", text: "workflow_next requires a non-empty transitionId." }],
+					details: details({ queued: false, reason: "MISSING_TRANSITION_ID" }),
+					isError: true,
+				};
+			}
+
+			if (pendingToolTransition) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `workflow_next ignored because ${pendingToolTransition.transitionId} is already queued.`,
+						},
+					],
+					details: details({
+						queued: false,
+						reason: "TRANSITION_ALREADY_QUEUED",
+						pendingTransitionId: pendingToolTransition.transitionId,
+					}),
+				};
+			}
+
+			pendingToolTransition = {
+				toolCallId,
+				workflowId,
+				transitionId,
+			};
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Queued workflow transition ${transitionId}. It will be applied after tool execution ends.`,
+					},
+				],
+				details: details({ queued: true, workflowId, transitionId }),
+			};
+		},
+	});
+
+	pi.on("tool_execution_end", async (event, ctx) => {
+		const pending = pendingToolTransition;
+		if (!pending) return;
+		if (event.toolName !== WORKFLOW_NEXT_TOOL) return;
+		if (event.toolCallId !== pending.toolCallId) return;
+
+		pendingToolTransition = null;
+
+		try {
+			await chooseAgentAndRunEnteredState(pending.workflowId, pending.transitionId, ctx);
+		} catch (error) {
+			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+		}
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		captureSessionSnapshot(ctx);
 		snapshots.clear();
 		activeWorkflowId = null;
+		pendingToolTransition = null;
 		for (const entry of ctx.sessionManager.getEntries() as Array<any>) {
 			if (entry.type !== "custom") continue;
 			if (entry.customType === SNAPSHOT_ENTRY) {
@@ -395,42 +517,7 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("workflow-next", {
-		description: "Run the current state of the active workflow",
-		handler: async (args, ctx) => {
-			const workflowId = requireActiveWorkflowId(ctx, args);
-			if (!workflowId) return;
-
-			captureSessionSnapshot(ctx);
-			const result = await service.runNext(workflowId, Date.now());
-			await refreshWidget(ctx);
-
-			if (result.kind === "advanced") {
-				ctx.ui.notify(`Advanced to ${result.nextStateId}`, "info");
-				return;
-			}
-
-			if (result.kind === "waitingManual") {
-				if (ctx.hasUI) {
-					const choice = await ctx.ui.select(
-						"Choose workflow transition",
-						result.candidates.map((candidate) => `${candidate.id} -> ${candidate.to}`),
-					);
-					if (choice) {
-						const transitionId = choice.split(" -> ")[0] ?? choice;
-						await chooseManualAndRunEnteredState(workflowId, transitionId, ctx);
-						return;
-					}
-				}
-				ctx.ui.notify("Workflow is waiting for manual transition.", "info");
-				return;
-			}
-
-			ctx.ui.notify(`Workflow ${workflowId} completed.`, "info");
-		},
-	});
-
-	pi.registerCommand("workflow-choose", {
-		description: "Choose a manual transition: /workflow-choose <transitionId>",
+		description: "Choose a manual transition: /workflow-next <transitionId>",
 		handler: async (args, ctx) => {
 			const workflowId = activeWorkflowId;
 			const transitionId = parseWorkflowIdArg(args);
@@ -439,7 +526,7 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 				return;
 			}
 			if (!transitionId) {
-				ctx.ui.notify("Usage: /workflow-choose <transitionId>", "warning");
+				ctx.ui.notify("Usage: /workflow-next <transitionId>", "warning");
 				return;
 			}
 

@@ -2,8 +2,9 @@ export type WorkflowId = string;
 export type StateId = string;
 export type TransitionId = string;
 export type GuardName = string;
+export type SelectableTransitionTrigger = "manual" | "manualOrAgent";
 
-export type WorkflowTrigger = "success" | "error" | "always" | "manual";
+export type WorkflowTrigger = "success" | "error" | "always" | SelectableTransitionTrigger;
 
 export type WorkflowDefinition = {
 	id: WorkflowId;
@@ -227,5 +228,6 @@ export type WorkflowService = {
 	start: (workflowId: WorkflowId, now: number) => Promise<WorkflowRunState>;
 	runNext: (workflowId: WorkflowId, now: number) => Promise<WorkflowAdvanceResult>;
 	chooseManual: (workflowId: WorkflowId, transitionId: TransitionId, now: number) => Promise<WorkflowRunState>;
+	chooseAgent: (workflowId: WorkflowId, transitionId: TransitionId, now: number) => Promise<WorkflowRunState>;
 	getRun: (workflowId: WorkflowId) => Promise<WorkflowRunState | null>;
 };

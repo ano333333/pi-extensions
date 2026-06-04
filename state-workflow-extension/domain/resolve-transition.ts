@@ -2,6 +2,7 @@ import type {
 	GuardRegistry,
 	ResolveTransitionInput,
 	ResolveTransitionResult,
+	SelectableTransitionTrigger,
 	WorkflowTransition,
 	WorkflowTrigger,
 } from "./types.js";
@@ -48,7 +49,8 @@ export const resolveTransition = (input: ResolveTransitionInput): ResolveTransit
 		};
 	}
 
-	const manual = findByTrigger("manual", input);
+	const selectableTriggers: SelectableTransitionTrigger[] = ["manual", "manualOrAgent"];
+	const manual = selectableTriggers.flatMap((trigger) => findByTrigger(trigger, input));
 	if (manual.length > 0) {
 		return {
 			kind: "manual",

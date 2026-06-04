@@ -13,7 +13,7 @@ const workflow: WorkflowDefinition = {
 			action: { kind: "function", handler: "noop" },
 			transitions: [
 				{ id: "approve", to: "deploy", trigger: "manual" },
-				{ id: "reject", to: "abort", trigger: "manual" },
+				{ id: "reject", to: "abort", trigger: "manualOrAgent" },
 			],
 		},
 		deploy: {
@@ -79,5 +79,33 @@ describe("selectManualTransition", () => {
 				now: 30,
 			}),
 		).toThrow('Manual transition "missing" is not available in state "review"');
+	});
+
+	it("can restrict allowed triggers to agent-selectable transitions", () => {
+		const run = {
+			...createInitialRunState(workflow, 10),
+			status: "waitingManual" as const,
+			history: [{ stateId: "review", startedAt: 10, finishedAt: 20, result: "success" as const }],
+		};
+
+		expect(() =>
+			selectManualTransition({
+				definition: workflow,
+				run,
+				transitionId: "approve",
+				now: 30,
+				allowedTriggers: ["manualOrAgent"],
+			}),
+		).toThrow('Manual transition "approve" is not available in state "review"');
+
+		const result = selectManualTransition({
+			definition: workflow,
+			run,
+			transitionId: "reject",
+			now: 30,
+			allowedTriggers: ["manualOrAgent"],
+		});
+
+		expect(result.currentStateId).toBe("abort");
 	});
 });

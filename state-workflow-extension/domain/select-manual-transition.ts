@@ -1,23 +1,33 @@
-import type { WorkflowDefinition, WorkflowRunState, WorkflowTransition } from "./types.js";
+import type {
+	SelectableTransitionTrigger,
+	WorkflowDefinition,
+	WorkflowRunState,
+	WorkflowTransition,
+} from "./types.js";
 
 export type SelectManualTransitionInput = {
 	definition: WorkflowDefinition;
 	run: WorkflowRunState;
 	transitionId: string;
 	now: number;
+	allowedTriggers?: SelectableTransitionTrigger[];
 };
 
-const findManualTransition = (
+const findSelectableTransition = (
 	transitions: WorkflowTransition[],
 	transitionId: string,
+	allowedTriggers: SelectableTransitionTrigger[],
 ): WorkflowTransition | undefined =>
-	transitions.find((transition) => transition.trigger === "manual" && transition.id === transitionId);
+	transitions.find(
+		(transition) => allowedTriggers.includes(transition.trigger as SelectableTransitionTrigger) && transition.id === transitionId,
+	);
 
 export const selectManualTransition = ({
 	definition,
 	run,
 	transitionId,
 	now,
+	allowedTriggers = ["manual", "manualOrAgent"],
 }: SelectManualTransitionInput): WorkflowRunState => {
 	if (run.status !== "waitingManual") {
 		throw new Error("Workflow is not waiting for a manual transition");
@@ -31,7 +41,7 @@ export const selectManualTransition = ({
 		throw new Error(`Current state "${run.currentStateId}" is missing from workflow definition`);
 	}
 
-	const transition = findManualTransition(state.transitions, transitionId);
+	const transition = findSelectableTransition(state.transitions, transitionId, allowedTriggers);
 	if (!transition) {
 		throw new Error(`Manual transition "${transitionId}" is not available in state "${state.id}"`);
 	}

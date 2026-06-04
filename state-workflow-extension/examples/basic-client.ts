@@ -21,7 +21,7 @@ type ClientWorkflowAction =
 type WorkflowTransition = {
 	id: string;
 	to: string;
-	trigger: "success" | "error" | "always" | "manual";
+	trigger: "success" | "error" | "always" | "manual" | "manualOrAgent";
 	label?: string;
 	guard?: string;
 	priority?: number;

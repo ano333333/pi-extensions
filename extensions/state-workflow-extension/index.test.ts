@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import stateWorkflowExtension, { WORKFLOW_NEXT_TOOL } from "./index.js";
+import stateWorkflowExtension, { WORKFLOW_HISTORY_TOOL, WORKFLOW_NEXT_TOOL } from "./index.js";
 
 type CommandHandler = (args: string, ctx: any) => Promise<void>;
 type ToolHandler = (
@@ -73,10 +73,12 @@ describe("stateWorkflowExtension commands", () => {
 		stateWorkflowExtension(api);
 
 		expect(commands.has("workflow-next")).toBe(true);
+		expect(commands.has("workflow-history")).toBe(true);
 		expect(commands.has("workflow-choose")).toBe(false);
 		expect(tools.has(WORKFLOW_NEXT_TOOL)).toBe(true);
+		expect(tools.has(WORKFLOW_HISTORY_TOOL)).toBe(true);
 		expect(commandDescriptions.get("workflow-next")).toBe(
-			"Choose a manual transition: /workflow-next <transitionId>",
+			"Choose a manual transition: /workflow-next [transitionId]",
 		);
 	});
 
@@ -92,7 +94,7 @@ describe("stateWorkflowExtension commands", () => {
 		expect(ctx.ui.notify).toHaveBeenCalledWith("No active workflow.", "warning");
 	});
 
-	it("shows usage for workflow-next when transition id is missing", async () => {
+	it("auto-selects the only manual transition when workflow-next has no transition id", async () => {
 		const { api, commands, eventHandlers } = createExtensionApiMock();
 		stateWorkflowExtension(api);
 
@@ -122,10 +124,57 @@ describe("stateWorkflowExtension commands", () => {
 		expect(nextHandler).toBeTypeOf("function");
 
 		const ctx = createCommandContext();
-		await startHandler!("wf", ctx);
+		await startHandler!("wf --run", ctx);
 		await nextHandler!("", ctx);
 
-		expect(ctx.ui.notify).toHaveBeenCalledWith("Usage: /workflow-next <transitionId>", "warning");
+		expect(ctx.ui.notify).toHaveBeenCalledWith("Selected transition approve", "info");
+		expect(ctx.ui.notify).toHaveBeenCalledWith("Workflow wf completed.", "info");
+		expect(ctx.ui.select).not.toHaveBeenCalled();
+	});
+
+	it("opens a selection UI when workflow-next has multiple manual candidates", async () => {
+		const { api, commands, eventHandlers } = createExtensionApiMock();
+		stateWorkflowExtension(api);
+
+		const registerWorkflow = eventHandlers.get("state-workflow:register-workflow")?.[0];
+		expect(registerWorkflow).toBeTypeOf("function");
+
+		registerWorkflow!({
+			id: "wf",
+			initialStateId: "review",
+			states: {
+				review: {
+					id: "review",
+					action: { kind: "continueSession" },
+					transitions: [
+						{ id: "approve", to: "done", trigger: "manual", label: "Approve changes" },
+						{ id: "reject", to: "done", trigger: "manual", label: "Reject changes" },
+					],
+				},
+				done: {
+					id: "done",
+					action: { kind: "continueSession" },
+					transitions: [],
+				},
+			},
+		});
+
+		const startHandler = commands.get("workflow-start");
+		const nextHandler = commands.get("workflow-next");
+		expect(startHandler).toBeTypeOf("function");
+		expect(nextHandler).toBeTypeOf("function");
+
+		const ctx = createCommandContext();
+		ctx.ui.select.mockResolvedValue("reject (Reject changes) -> done [manual]");
+
+		await startHandler!("wf --run", ctx);
+		await nextHandler!("", ctx);
+
+		expect(ctx.ui.select).toHaveBeenCalledWith("Choose a workflow transition", [
+			"approve (Approve changes) -> done [manual]",
+			"reject (Reject changes) -> done [manual]",
+		]);
+		expect(ctx.ui.notify).toHaveBeenCalledWith("Selected transition reject", "info");
 	});
 
 	it("auto-runs chained states after workflow-start --run until completion", async () => {
@@ -424,5 +473,100 @@ describe("stateWorkflowExtension commands", () => {
 			"error",
 		);
 		expect(ctx.ui.notify).not.toHaveBeenCalledWith("Selected agent transition approve", "info");
+	});
+
+	it("shows workflow history from a command", async () => {
+		const { api, commands, eventHandlers } = createExtensionApiMock();
+		stateWorkflowExtension(api);
+
+		const registerWorkflow = eventHandlers.get("state-workflow:register-workflow")?.[0];
+		expect(registerWorkflow).toBeTypeOf("function");
+
+		registerWorkflow!({
+			id: "wf",
+			initialStateId: "review",
+			states: {
+				review: {
+					id: "review",
+					action: { kind: "continueSession" },
+					transitions: [{ id: "approve", to: "done", trigger: "manual" }],
+				},
+				done: {
+					id: "done",
+					action: { kind: "continueSession" },
+					transitions: [],
+				},
+			},
+		});
+
+		const startHandler = commands.get("workflow-start");
+		const nextHandler = commands.get("workflow-next");
+		const historyHandler = commands.get("workflow-history");
+		expect(startHandler).toBeTypeOf("function");
+		expect(nextHandler).toBeTypeOf("function");
+		expect(historyHandler).toBeTypeOf("function");
+
+		const ctx = createCommandContext();
+		await startHandler!("wf --run", ctx);
+		await nextHandler!("approve", ctx);
+		await historyHandler!("", ctx);
+
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			expect.stringContaining("History:\n- review | started="),
+			"info",
+		);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			expect.stringContaining("transition=approve"),
+			"info",
+		);
+	});
+
+	it("returns workflow history from a tool", async () => {
+		const { api, commands, tools, eventHandlers } = createExtensionApiMock();
+		stateWorkflowExtension(api);
+
+		const registerWorkflow = eventHandlers.get("state-workflow:register-workflow")?.[0];
+		const historyTool = tools.get(WORKFLOW_HISTORY_TOOL);
+		expect(registerWorkflow).toBeTypeOf("function");
+		expect(historyTool).toBeTypeOf("function");
+
+		registerWorkflow!({
+			id: "wf",
+			initialStateId: "review",
+			states: {
+				review: {
+					id: "review",
+					action: { kind: "continueSession" },
+					transitions: [{ id: "approve", to: "done", trigger: "manual" }],
+				},
+				done: {
+					id: "done",
+					action: { kind: "continueSession" },
+					transitions: [],
+				},
+			},
+		});
+
+		const startHandler = commands.get("workflow-start");
+		const nextHandler = commands.get("workflow-next");
+		expect(startHandler).toBeTypeOf("function");
+		expect(nextHandler).toBeTypeOf("function");
+
+		const ctx = createCommandContext();
+		await startHandler!("wf --run", ctx);
+		await nextHandler!("approve", ctx);
+
+		const result = await historyTool!("call-history", {}, undefined, undefined, ctx);
+		expect(result).toMatchObject({
+			details: {
+				workflowId: "wf",
+				status: "completed",
+				currentStateId: null,
+				history: [
+					expect.objectContaining({ stateId: "review", transitionId: "approve" }),
+					expect.objectContaining({ stateId: "done" }),
+				],
+			},
+		});
 	});
 });

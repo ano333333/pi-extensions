@@ -22,6 +22,25 @@ const findSelectableTransition = (
 		(transition) => allowedTriggers.includes(transition.trigger as SelectableTransitionTrigger) && transition.id === transitionId,
 	);
 
+export const listSelectableTransitions = (
+	definition: WorkflowDefinition,
+	run: WorkflowRunState,
+	allowedTriggers: SelectableTransitionTrigger[] = ["manual", "manualOrAgent"],
+): WorkflowTransition[] => {
+	if (run.status !== "waitingManual" || !run.currentStateId) {
+		return [];
+	}
+
+	const state = definition.states[run.currentStateId];
+	if (!state) {
+		return [];
+	}
+
+	return state.transitions.filter((transition) =>
+		allowedTriggers.includes(transition.trigger as SelectableTransitionTrigger),
+	);
+};
+
 export const selectManualTransition = ({
 	definition,
 	run,
@@ -41,7 +60,11 @@ export const selectManualTransition = ({
 		throw new Error(`Current state "${run.currentStateId}" is missing from workflow definition`);
 	}
 
-	const transition = findSelectableTransition(state.transitions, transitionId, allowedTriggers);
+	const transition = findSelectableTransition(
+		listSelectableTransitions(definition, run, allowedTriggers),
+		transitionId,
+		allowedTriggers,
+	);
 	if (!transition) {
 		throw new Error(`Manual transition "${transitionId}" is not available in state "${state.id}"`);
 	}

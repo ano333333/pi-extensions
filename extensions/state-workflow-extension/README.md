@@ -208,10 +208,12 @@ base extension は AI agent 向けに `workflow_next` tool も登録します。
 
 - `/workflow-list`
 - `/workflow-start <id>`
-- `/workflow-next <transitionId>`
+- `/workflow-next [transitionId]`
+- `/workflow-history [workflowId]`
 - `/workflow-status`
 - `/workflow-abort`
 
 ## Tools
 
 - `workflow_next({ transitionId })`
+- `workflow_history({ workflowId? })`

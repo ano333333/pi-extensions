@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { selectManualTransition } from "./select-manual-transition.js";
+import { listSelectableTransitions, selectManualTransition } from "./select-manual-transition.js";
 import { createInitialRunState } from "./runtime.js";
 import type { WorkflowDefinition } from "./types.js";
 
@@ -30,6 +30,22 @@ const workflow: WorkflowDefinition = {
 };
 
 describe("selectManualTransition", () => {
+	it("lists selectable transitions only while waiting for manual input", () => {
+		const idleRun = createInitialRunState(workflow, 10);
+		expect(listSelectableTransitions(workflow, idleRun)).toEqual([]);
+
+		const waitingRun = {
+			...idleRun,
+			status: "waitingManual" as const,
+			history: [{ stateId: "review", startedAt: 10, finishedAt: 20, result: "success" as const }],
+		};
+
+		expect(listSelectableTransitions(workflow, waitingRun)).toEqual(workflow.states.review.transitions);
+		expect(listSelectableTransitions(workflow, waitingRun, ["manualOrAgent"])).toEqual([
+			workflow.states.review.transitions[1],
+		]);
+	});
+
 	it("advances to selected transition target and appends next history entry", () => {
 		const run = {
 			...createInitialRunState(workflow, 10),

@@ -3,6 +3,7 @@ import { Type } from "typebox";
 
 import {
 	createInMemoryWorkflowRunStore,
+	listSelectableTransitions,
 	createNullPresenter,
 	createWorkflowRegistry,
 	createWorkflowService,
@@ -17,6 +18,7 @@ export const REGISTER_WORKFLOW_EVENT = "state-workflow:register-workflow";
 export const REGISTER_FUNCTION_HANDLER_EVENT = "state-workflow:register-function-handler";
 export const START_WORKFLOW_EVENT = "state-workflow:start-workflow";
 export const WORKFLOW_NEXT_TOOL = "workflow_next";
+export const WORKFLOW_HISTORY_TOOL = "workflow_history";
 
 export type WorkflowSessionSnapshot = {
 	entries: unknown[];
@@ -96,6 +98,13 @@ type WorkflowNextToolDetails = {
 	transitionId?: string;
 };
 
+type WorkflowHistoryToolDetails = {
+	workflowId: string;
+	status: WorkflowRunState["status"];
+	currentStateId: string | null;
+	history: WorkflowRunState["history"];
+};
+
 const parseWorkflowIdArg = (args: string): string | undefined => {
 	const workflowId = args.trim();
 	return workflowId || undefined;
@@ -129,9 +138,42 @@ const formatRunLines = (workflow: WorkflowDefinition, run: WorkflowRunState): st
 		lines.push("- <none>");
 	} else {
 		for (const transition of transitions) {
-			const label = transition.label ? ` (${transition.label})` : "";
-			lines.push(`- ${transition.id}${label} -> ${transition.to} [${transition.trigger}]`);
+			lines.push(`- ${formatTransitionOption(transition)}`);
 		}
+	}
+
+	return lines;
+};
+
+const formatTransitionOption = (transition: WorkflowDefinition["states"][string]["transitions"][number]): string => {
+	const label = transition.label ? ` (${transition.label})` : "";
+	return `${transition.id}${label} -> ${transition.to} [${transition.trigger}]`;
+};
+
+const formatTimestamp = (value: number | undefined): string => {
+	if (value === undefined) return "-";
+	return new Date(value).toISOString();
+};
+
+const formatHistoryLines = (workflow: WorkflowDefinition, run: WorkflowRunState): string[] => {
+	const lines = [
+		`Workflow: ${workflow.id}`,
+		`Current: ${run.currentStateId ?? "<completed>"}`,
+		`Status: ${run.status}`,
+		"History:",
+	];
+
+	if (run.history.length === 0) {
+		lines.push("- <empty>");
+		return lines;
+	}
+
+	for (const entry of run.history) {
+		const result = entry.result ?? "-";
+		const transitionId = entry.transitionId ?? "-";
+		lines.push(
+			`- ${entry.stateId} | started=${formatTimestamp(entry.startedAt)} | finished=${formatTimestamp(entry.finishedAt)} | result=${result} | transition=${transitionId}`,
+		);
 	}
 
 	return lines;
@@ -289,6 +331,26 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 		return workflowId;
 	};
 
+	const getSelectableTransitions = async (
+		workflowId: string,
+	): Promise<{
+		workflow: WorkflowDefinition;
+		run: WorkflowRunState;
+		transitions: WorkflowDefinition["states"][string]["transitions"];
+	}> => {
+		const workflow = registry.get(workflowId);
+		const run = await service.getRun(workflowId);
+		if (!workflow || !run) {
+			throw new Error(`Workflow ${workflowId} has no active run.`);
+		}
+
+		return {
+			workflow,
+			run,
+			transitions: listSelectableTransitions(workflow, run),
+		};
+	};
+
 	const runUntilPauseOrCompletion = async (
 		workflowId: string,
 		ctx: ExtensionContext,
@@ -301,6 +363,41 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 				return result;
 			}
 		}
+	};
+
+	const resolveManualTransitionId = async (
+		workflowId: string,
+		explicitTransitionId: string | undefined,
+		ctx: ExtensionCommandContext,
+	): Promise<string | undefined> => {
+		if (explicitTransitionId) {
+			return explicitTransitionId;
+		}
+
+		const { transitions } = await getSelectableTransitions(workflowId);
+		if (transitions.length === 0) {
+			ctx.ui.notify("No selectable manual transitions are available.", "warning");
+			return undefined;
+		}
+
+		if (transitions.length === 1) {
+			return transitions[0].id;
+		}
+
+		if (!ctx.hasUI) {
+			ctx.ui.notify("Multiple transitions are available. Use /workflow-next <transitionId>.", "warning");
+			return undefined;
+		}
+
+		const options = transitions.map(formatTransitionOption);
+		const selected = await ctx.ui.select("Choose a workflow transition", options);
+		if (!selected) {
+			ctx.ui.notify("Workflow transition selection cancelled.", "info");
+			return undefined;
+		}
+
+		const selectedIndex = options.indexOf(selected);
+		return selectedIndex >= 0 ? transitions[selectedIndex].id : undefined;
 	};
 
 	const chooseManualAndRunEnteredState = async (
@@ -447,6 +544,49 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerTool({
+		name: WORKFLOW_HISTORY_TOOL,
+		label: "Workflow History",
+		description: "Show state transition history for the active workflow or a specified workflow.",
+		promptSnippet: "Use workflow_history to inspect the workflow state transition log before deciding the next step.",
+		parameters: Type.Object({
+			workflowId: Type.Optional(
+				Type.String({
+					description: "Workflow ID. When omitted, the active workflow is used.",
+				}),
+			),
+		}),
+		async execute(_toolCallId, params) {
+			const workflowId = params.workflowId?.trim() || activeWorkflowId;
+			if (!workflowId) {
+				return {
+					content: [{ type: "text", text: "No active workflow. workflow_history was ignored." }],
+					details: { reason: "NO_ACTIVE_WORKFLOW" },
+				};
+			}
+
+			const workflow = registry.get(workflowId);
+			const run = await service.getRun(workflowId);
+			if (!workflow || !run) {
+				return {
+					content: [{ type: "text", text: `Workflow ${workflowId} has no active run.` }],
+					details: { reason: "RUN_NOT_FOUND", workflowId },
+					isError: true,
+				};
+			}
+
+			return {
+				content: [{ type: "text", text: formatHistoryLines(workflow, run).join("\n") }],
+				details: {
+					workflowId,
+					status: run.status,
+					currentStateId: run.currentStateId,
+					history: run.history,
+				} satisfies WorkflowHistoryToolDetails,
+			};
+		},
+	});
+
 	pi.on("tool_execution_end", async (event, ctx) => {
 		const pending = pendingToolTransition;
 		if (!pending) return;
@@ -517,20 +657,34 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("workflow-next", {
-		description: "Choose a manual transition: /workflow-next <transitionId>",
+		description: "Choose a manual transition: /workflow-next [transitionId]",
 		handler: async (args, ctx) => {
 			const workflowId = activeWorkflowId;
-			const transitionId = parseWorkflowIdArg(args);
 			if (!workflowId) {
 				ctx.ui.notify("No active workflow.", "warning");
 				return;
 			}
+			const transitionId = await resolveManualTransitionId(workflowId, parseWorkflowIdArg(args), ctx);
 			if (!transitionId) {
-				ctx.ui.notify("Usage: /workflow-next <transitionId>", "warning");
 				return;
 			}
 
 			await chooseManualAndRunEnteredState(workflowId, transitionId, ctx);
+		},
+	});
+
+	pi.registerCommand("workflow-history", {
+		description: "Show workflow transition history",
+		handler: async (args, ctx) => {
+			const workflowId = requireActiveWorkflowId(ctx, args);
+			if (!workflowId) return;
+			const workflow = registry.get(workflowId);
+			const run = await service.getRun(workflowId);
+			if (!workflow || !run) {
+				ctx.ui.notify(`Workflow ${workflowId} has no active run.`, "warning");
+				return;
+			}
+			ctx.ui.notify(formatHistoryLines(workflow, run).join("\n"), "info");
 		},
 	});
 

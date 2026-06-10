@@ -569,4 +569,53 @@ describe("stateWorkflowExtension commands", () => {
 			},
 		});
 	});
+
+	it("does not touch the old ctx after dispatching a workflow userMessage", async () => {
+		const { api, commands, eventHandlers } = createExtensionApiMock();
+		stateWorkflowExtension(api);
+
+		const registerWorkflow = eventHandlers.get("state-workflow:register-workflow")?.[0];
+		expect(registerWorkflow).toBeTypeOf("function");
+
+		registerWorkflow!({
+			id: "wf",
+			initialStateId: "review",
+			states: {
+				review: {
+					id: "review",
+					action: { kind: "continueSession" },
+					transitions: [{ id: "approve", to: "ask-agent", trigger: "manual" }],
+				},
+				"ask-agent": {
+					id: "ask-agent",
+					action: { kind: "userMessage", content: "/reload-runtime" },
+					transitions: [{ id: "queued", to: "done", trigger: "success" }],
+				},
+				done: {
+					id: "done",
+					action: { kind: "continueSession" },
+					transitions: [],
+				},
+			},
+		});
+
+		const startHandler = commands.get("workflow-start");
+		const nextHandler = commands.get("workflow-next");
+		expect(startHandler).toBeTypeOf("function");
+		expect(nextHandler).toBeTypeOf("function");
+
+		const ctx = createCommandContext();
+		api.sendUserMessage.mockImplementation(() => {
+			ctx.ui.notify.mockImplementation(() => {
+				throw new Error("stale ctx notify");
+			});
+			ctx.ui.setWidget.mockImplementation(() => {
+				throw new Error("stale ctx widget");
+			});
+		});
+
+		await startHandler!("wf --run", ctx);
+		await expect(nextHandler!("approve", ctx)).resolves.toBeUndefined();
+		expect(api.sendUserMessage).toHaveBeenCalledWith("/reload-runtime");
+	});
 });

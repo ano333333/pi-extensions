@@ -179,6 +179,9 @@ const formatHistoryLines = (workflow: WorkflowDefinition, run: WorkflowRunState)
 	return lines;
 };
 
+const dispatchedUserMessage = (result: WorkflowAdvanceResult): boolean =>
+	result.run.lastResult?.raw.kind === "userMessage";
+
 export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 	const registry = createWorkflowRegistry();
 	const functionHandlers = new Map<string, WorkflowFunctionHandler>();
@@ -358,6 +361,9 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 		for (;;) {
 			captureSessionSnapshot(ctx);
 			const result = await service.runNext(workflowId, Date.now());
+			if (dispatchedUserMessage(result)) {
+				return result;
+			}
 			await refreshWidget(ctx);
 			if (result.kind !== "advanced") {
 				return result;
@@ -411,6 +417,9 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 		ctx.ui.notify(`Selected transition ${transitionId}`, "info");
 
 		const result = await runUntilPauseOrCompletion(workflowId, ctx);
+		if (dispatchedUserMessage(result)) {
+			return;
+		}
 
 		if (result.kind === "waitingManual") {
 			ctx.ui.notify("Workflow is waiting for manual transition.", "info");
@@ -430,6 +439,9 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 		ctx.ui.notify(`Selected agent transition ${transitionId}`, "info");
 
 		const result = await runUntilPauseOrCompletion(workflowId, ctx);
+		if (dispatchedUserMessage(result)) {
+			return;
+		}
 
 		if (result.kind === "waitingManual") {
 			ctx.ui.notify("Workflow is waiting for manual transition.", "info");
@@ -459,6 +471,9 @@ export default function stateWorkflowExtension(pi: ExtensionAPI): void {
 		}
 
 		const result = await runUntilPauseOrCompletion(workflowId, ctx);
+		if (dispatchedUserMessage(result)) {
+			return;
+		}
 		if (result.kind === "waitingManual") {
 			ctx.ui.notify("Started workflow and entered manual transition wait state.", "info");
 			return;
